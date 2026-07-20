@@ -29,6 +29,25 @@ export function getClientSupportsMethod(capabilities: ClientCapabilities | undef
 	return flags?.[method] === true
 }
 
+// Client→agent RPC methods exposed via the ACP `extMethod` dispatch. These are
+// separate from `AVAILABLE_METHODS` (which covers agent→client UI calls gated
+// on `getClientSupportsMethod`) because the direction and capability semantics
+// differ: the client invokes these on the agent, and presence in the advertised
+// `_meta` map signals "the agent can answer this query".
+export const AGENT_RPC_METHODS = {
+	get_budget: `_${CAPABILITIES_KEY}/getBudget`,
+} as const
+
+export type AgentRpcMethod = keyof typeof AGENT_RPC_METHODS
+
+export const ADVERTISED_AGENT_RPC: Record<AgentRpcMethod, boolean> = Object.keys(AGENT_RPC_METHODS).reduce(
+	(acc, method) => {
+		acc[method as AgentRpcMethod] = true
+		return acc
+	},
+	{} as Record<AgentRpcMethod, boolean>,
+)
+
 // Presence-based on purpose: an empty `form: {}` is the documented way to
 // declare elicitation support, so any non-null value is enough.
 export function getClientSupportsElicitation(capabilities: ClientCapabilities | undefined): boolean {

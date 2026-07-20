@@ -56,6 +56,7 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent"
+import { type BillingStatus, refreshBillingStatusFromConfig } from "../../extensions/billing/status.js"
 import { refFromModel, splitModelRef } from "../../extensions/model-catalog/ref-utils.js"
 import { getMultiModelEnabled, setMultiModelEnabled } from "../../extensions/multi-model.js"
 import { getOrchestratorModel } from "../../extensions/orchestration/model-roles.js"
@@ -79,7 +80,7 @@ import {
 import type { PermissionMode } from "../../extensions/permissions/types.js"
 import { createAcpPermissionPrompter } from "./acp-prompter.js"
 import { createAcpUIContext } from "./acp-ui-context.js"
-import { ADVERTISED_CAPABILITIES, CAPABILITIES_KEY } from "./capabilities.js"
+import { ADVERTISED_AGENT_RPC, ADVERTISED_CAPABILITIES, AGENT_RPC_METHODS, CAPABILITIES_KEY } from "./capabilities.js"
 import { AVAILABLE_COMMANDS } from "./commands.js"
 import { registerAcpPrompter, unregisterAcpPrompter } from "./permission-prompter-registry.js"
 
@@ -114,6 +115,8 @@ export interface RunAcpOptions {
 	sessionLister?: AcpSessionLister
 	/** Override for tests. Defaults to {@link defaultSessionLoader}. */
 	sessionLoader?: AcpSessionLoader
+	/** Override for tests. Defaults to {@link refreshBillingStatusFromConfig}. */
+	budgetRefresher?: () => Promise<BillingStatus | undefined>
 }
 
 type TurnContext = {
@@ -163,6 +166,7 @@ export class KimchiAcpAgent implements Agent {
 	// earlier session record.
 	private loadingSessions = new Map<string, Promise<LoadSessionResponse>>()
 	private shutdownPromise: Promise<void> | undefined
+	private readonly budgetRefresher: () => Promise<BillingStatus | undefined>
 
 	/**
 	 * Resolve the initial permission mode for a session based on:
@@ -189,6 +193,7 @@ export class KimchiAcpAgent implements Agent {
 		this.agentDir = options.agentDir
 		this.sessionLister = options.sessionLister ?? defaultSessionLister(options)
 		this.sessionLoader = options.sessionLoader ?? defaultSessionLoader(options)
+		this.budgetRefresher = options.budgetRefresher ?? refreshBillingStatusFromConfig
 	}
 
 	async initialize(request: InitializeRequest): Promise<InitializeResponse> {
@@ -208,7 +213,7 @@ export class KimchiAcpAgent implements Agent {
 				sessionCapabilities: { list: {}, close: {} },
 				promptCapabilities: { image: supportsImages, audio: false, embeddedContext: false },
 				// Extended capabilities
-				_meta: { [CAPABILITIES_KEY]: ADVERTISED_CAPABILITIES },
+				_meta: { [CAPABILITIES_KEY]: { ...ADVERTISED_CAPABILITIES, ...ADVERTISED_AGENT_RPC } },
 			},
 			authMethods: [],
 		}
@@ -241,6 +246,20 @@ export class KimchiAcpAgent implements Agent {
 
 	async authenticate(_: AuthenticateRequest): Promise<AuthenticateResponse> {
 		return {}
+	}
+
+	/**
+	 * Client→agent RPC dispatch. The ACP SDK routes any JSON-RPC method it
+	 * doesn't recognize here (see @agentclientprotocol/sdk requestHandler).
+	 * Each entry in `AGENT_RPC_METHODS` is advertised via `_meta[CAPABILITIES_KEY]`
+	 * in {@link initialize}, so clients can feature-detect before calling.
+	 */
+	async extMethod(method: string, _params: Record<string, unknown>): Promise<Record<string, unknown>> {
+		if (method === AGENT_RPC_METHODS.get_budget) {
+			const status = await this.budgetRefresher()
+			return { account: status ?? null }
+		}
+		throw RequestError.methodNotFound(method)
 	}
 
 	async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {

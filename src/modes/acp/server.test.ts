@@ -26,6 +26,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 const THEME_KEY = Symbol.for("@earendil-works/pi-coding-agent:theme")
 const THEME_KEY_OLD = Symbol.for("@mariozechner/pi-coding-agent:theme")
 
+import type { BillingStatus } from "../../extensions/billing/status.js"
 import { setProcessOrchestratorRef } from "../../extensions/kimchi-process.js"
 import { getMultiModelEnabled, setMultiModelEnabled } from "../../extensions/multi-model.js"
 import { PERMISSION_MODES, PERMISSIONS_ENV_KEY } from "../../extensions/permissions/constants.js"
@@ -4664,5 +4665,95 @@ describe("userMessageText", () => {
 	it("returns empty string for null / non-array user content", () => {
 		expect(userMessageText(null)).toBe("")
 		expect(userMessageText(42)).toBe("")
+	})
+})
+
+describe("KimchiAcpAgent extMethod getBudget", () => {
+	it("advertises get_budget capability in initialize _meta", async () => {
+		const agent = new KimchiAcpAgent(makeConn(), {
+			extensionFactories: [],
+			agentDir: "/tmp/fake-agent-dir",
+			sessionFactory: async () => asSession(new FakeAgentSession("unused")),
+			budgetRefresher: async () => undefined,
+		})
+		const init = await agent.initialize({
+			protocolVersion: 1,
+			clientCapabilities: {} as never,
+		} as never)
+		const flags = init.agentCapabilities?._meta?.["kimchi.dev"] as Record<string, boolean> | undefined
+		expect(flags?.get_budget).toBe(true)
+	})
+
+	it("returns account: null when budgetRefresher resolves undefined (no endpoint configured)", async () => {
+		const agent = new KimchiAcpAgent(makeConn(), {
+			extensionFactories: [],
+			agentDir: "/tmp/fake-agent-dir",
+			sessionFactory: async () => asSession(new FakeAgentSession("unused")),
+			budgetRefresher: async () => undefined,
+		})
+		const result = await agent.extMethod("_kimchi.dev/getBudget", {})
+		expect(result).toEqual({ account: null })
+	})
+
+	it("returns the seeded BillingStatus as account when refresher resolves one", async () => {
+		const seeded: BillingStatus = {
+			serverless: true,
+			plan: "coder",
+			isPaidTier: true,
+			remainingCredits: 42.5,
+			creditStatus: "ok",
+			restrictedMode: false,
+			updatedAt: "2026-07-20T00:00:00.000Z",
+		}
+		const agent = new KimchiAcpAgent(makeConn(), {
+			extensionFactories: [],
+			agentDir: "/tmp/fake-agent-dir",
+			sessionFactory: async () => asSession(new FakeAgentSession("unused")),
+			budgetRefresher: async () => seeded,
+		})
+		const result = await agent.extMethod("_kimchi.dev/getBudget", {})
+		expect(result).toEqual({ account: seeded })
+	})
+
+	it("includes budget snapshot when present", async () => {
+		const seeded: BillingStatus = {
+			plan: "teams",
+			isPaidTier: true,
+			remainingCredits: 100,
+			creditStatus: "ok",
+			restrictedMode: false,
+			budget: {
+				period: { startTime: "2026-07-01T00:00:00.000Z", endTime: "2026-07-31T23:59:59.999Z" },
+				budgets: [
+					{
+						scope: "USER",
+						scopeId: "user-1",
+						budgetLimitUsd: "100",
+						totalSpendUsd: "12.34",
+						providerBudgets: [{ provider: "anthropic", limitType: "CAPPED", budgetLimitUsd: "50", usageUsd: "7" }],
+					},
+				],
+			},
+			updatedAt: "2026-07-20T00:00:00.000Z",
+		}
+		const agent = new KimchiAcpAgent(makeConn(), {
+			extensionFactories: [],
+			agentDir: "/tmp/fake-agent-dir",
+			sessionFactory: async () => asSession(new FakeAgentSession("unused")),
+			budgetRefresher: async () => seeded,
+		})
+		const result = await agent.extMethod("_kimchi.dev/getBudget", {})
+		expect(result.account).toEqual(seeded)
+		expect((result.account as BillingStatus).budget?.budgets).toHaveLength(1)
+	})
+
+	it("throws methodNotFound for an unknown ext method", async () => {
+		const agent = new KimchiAcpAgent(makeConn(), {
+			extensionFactories: [],
+			agentDir: "/tmp/fake-agent-dir",
+			sessionFactory: async () => asSession(new FakeAgentSession("unused")),
+			budgetRefresher: async () => undefined,
+		})
+		await expect(agent.extMethod("_kimchi.dev/unknown", {})).rejects.toThrow(/Method not found/)
 	})
 })
