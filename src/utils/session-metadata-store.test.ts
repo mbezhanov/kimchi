@@ -31,6 +31,7 @@ function makeConfig(overrides: Partial<KimchiConfig> = {}): KimchiConfig {
 		mcpSearch: SEARCH_STRATEGY,
 		onboarding: {},
 		deviceId: "test-device-id",
+		ideApproval: false,
 		...overrides,
 	}
 }

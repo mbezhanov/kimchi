@@ -172,6 +172,8 @@ export interface KimchiConfig {
 	onboarding: OnboardingConfig
 	deviceId: string
 	redaction?: { enabled?: boolean }
+	/** When true (default), the ide-adapter intercepts write/edit tool calls and routes them to the IDE's diff viewer for user approval before applying. Set to false to disable IDE approval entirely (writes apply directly). */
+	ideApproval: boolean
 }
 
 /**
@@ -208,6 +210,7 @@ function readConfigExtras(configPath: string): {
 	preferences?: PreferencesConfig
 	deviceId?: string
 	redaction?: { enabled?: boolean }
+	ideApproval?: boolean
 } {
 	try {
 		const raw = readFileSync(configPath, "utf-8")
@@ -280,6 +283,8 @@ function readConfigExtras(configPath: string): {
 			redaction = { enabled: rd.enabled }
 		}
 
+		const ideApproval = parseIdeApproval(parsed.ideApproval)
+
 		return {
 			apiKey,
 			llmEndpoint,
@@ -292,10 +297,21 @@ function readConfigExtras(configPath: string): {
 			deviceId,
 			preferences,
 			redaction,
+			ideApproval,
 		}
 	} catch {
 		return {}
 	}
+}
+
+/**
+ * Parse the `ideApproval` config field. Defaults to `true` (IDE approval is ON
+ * when an IDE is connected). Returns `undefined` when the field is absent so
+ * that `loadConfig` can apply the default at the merge boundary.
+ */
+function parseIdeApproval(value: unknown): boolean | undefined {
+	if (value === true || value === false) return value
+	return undefined
 }
 
 /**
@@ -466,6 +482,7 @@ export function loadConfig(options?: { configPath?: string; cwd?: string }): Kim
 		onboarding: globalExtras.onboarding,
 		deviceId: projectExtras.deviceId ?? globalExtras.deviceId,
 		redaction: projectExtras.redaction ?? globalExtras.redaction,
+		ideApproval: projectExtras.ideApproval ?? globalExtras.ideApproval,
 	}
 
 	return {
@@ -481,6 +498,7 @@ export function loadConfig(options?: { configPath?: string; cwd?: string }): Kim
 		onboarding: extras.onboarding ?? {},
 		deviceId: extras.deviceId ?? "",
 		redaction: extras.redaction,
+		ideApproval: extras.ideApproval ?? true,
 	}
 }
 

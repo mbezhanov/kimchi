@@ -1,7 +1,10 @@
-import { relative } from "node:path"
+import { readFileSync } from "node:fs"
+import { relative, resolve } from "node:path"
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { Type } from "typebox"
+import { loadConfig } from "../../config.js"
 import { formatAtMention } from "./at-mentions.js"
+import { applyEditInput } from "./edit-apply.js"
 import { findMatchingLockfile, getLockfileDir, parseLockfile, scanLockfiles } from "./lockfile.js"
 import { connectToIde } from "./mcp-client.js"
 import type { AtMentionNotification, IdeConnection, IdeTool, SelectionChangedNotification } from "./types.js"
@@ -13,6 +16,122 @@ const MAX_PENDING_MENTIONS = 100
 
 /** Max reconnect attempts before giving up on discovery polling. */
 const MAX_RECONNECT_RETRIES = 3
+
+/** Tool names that mutate files and must be gated by IDE approval when enabled. */
+const APPROVAL_GATED_TOOLS = new Set(["write", "edit"])
+
+/**
+ * Generate a short unique id for each proposed change, used for tool-window
+ * queue tracking on the IDE side. Not security-sensitive — `Date.now()` +
+ * random suffix is sufficient.
+ */
+function generateChangeId(): string {
+	return `chg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+}
+
+/** Read a file's current contents, returning "" if missing or unreadable. */
+function readCurrentContent(filePath: string): string {
+	try {
+		return readFileSync(filePath, "utf-8")
+	} catch {
+		return ""
+	}
+}
+
+/**
+ * Compute the proposed new content for a `write` or `edit` tool call.
+ *
+ * Returns `{ filePath, originalContent, newContent }` on success, or `null`
+ * when the inputs are malformed (e.g. `edit` with an `oldText` not present in
+ * the file — in that case we defer to the tool's own validation rather than
+ * duplicating the error message).
+ */
+function computeProposedChange(
+	toolName: string,
+	input: Record<string, unknown>,
+	cwd: string,
+): { filePath: string; originalContent: string; newContent: string } | null {
+	const rawPath =
+		typeof input.path === "string" ? input.path : typeof input.file_path === "string" ? input.file_path : ""
+	if (!rawPath) return null
+	const filePath = resolve(cwd, rawPath)
+	const originalContent = readCurrentContent(filePath)
+
+	if (toolName === "write") {
+		const newContent = typeof input.content === "string" ? input.content : ""
+		return { filePath, originalContent, newContent }
+	}
+
+	// edit
+	const newContent = applyEditInput(originalContent, input as Parameters<typeof applyEditInput>[1])
+	if (newContent === null) return null
+	return { filePath, originalContent, newContent }
+}
+
+/**
+ * Call the IDE's `proposeChange` tool and return whether the user approved.
+ *
+ * Returns `true` on approval, `false` on rejection/timeout/dismissal, and
+ * `null` when the IDE call itself failed (network error, tool not exposed,
+ * malformed response). On `null` the hook falls back to letting the write
+ * proceed — approval is best-effort, never a hard block on infrastructure
+ * failure.
+ *
+ * The MCP `tools/call` response is a `CallToolResult` envelope:
+ * ```
+ * { content: [{ type: "text", text: "{\"approved\": true, ...}" }] }
+ * ```
+ * The actual `{ approved, changeId }` payload is JSON-stringified inside the
+ * first text content block. We must unwrap and parse it before checking the
+ * `approved` field — checking `"approved" in result` on the envelope always
+ * returns false (the envelope has `content`, not `approved`), which would
+ * cause every call to fall into the `null` fallback and let writes proceed
+ * regardless of the user's decision.
+ */
+async function requestIdeApproval(
+	connection: IdeConnection,
+	params: { filePath: string; originalContent: string; newContent: string; changeId: string },
+	signal: AbortSignal | undefined,
+): Promise<boolean | null> {
+	try {
+		const result = await connection.callTool("proposeChange", params)
+		if (signal?.aborted) return null
+		const payload = unwrapMcpToolResult(result)
+		if (payload && typeof payload === "object" && "approved" in payload) {
+			return Boolean((payload as { approved: unknown }).approved)
+		}
+		return null
+	} catch {
+		return null
+	}
+}
+
+/**
+ * Extract the JSON payload from an MCP `tools/call` `CallToolResult` envelope.
+ *
+ * The IDE plugin's `McpJsonRpc.kt` wraps every tool result as:
+ * ```
+ * { content: [{ type: "text", text: "<json-stringified-result>" }] }
+ * ```
+ * This helper parses the first text content block as JSON and returns the
+ * parsed object. Returns `null` when the envelope is malformed or the text
+ * is not valid JSON.
+ */
+function unwrapMcpToolResult(result: unknown): unknown {
+	if (!result || typeof result !== "object") return null
+	const envelope = result as { content?: unknown }
+	const content = envelope.content
+	if (!Array.isArray(content) || content.length === 0) return null
+	const first = content[0]
+	if (!first || typeof first !== "object") return null
+	const text = (first as { text?: unknown }).text
+	if (typeof text !== "string") return null
+	try {
+		return JSON.parse(text)
+	} catch {
+		return null
+	}
+}
 
 export default function ideAdapterExtension(pi: ExtensionAPI): void {
 	let connection: IdeConnection | null = null
@@ -209,6 +328,52 @@ export default function ideAdapterExtension(pi: ExtensionAPI): void {
 			conn.close().catch((err) => console.warn("[ide-adapter] Disconnect error:", err))
 		}
 	}
+
+	pi.on("tool_call", async (event, ctx) => {
+		const toolName = event.toolName
+		if (!toolName || !APPROVAL_GATED_TOOLS.has(toolName)) return undefined
+
+		// Approval-gate config: ON by default. Loading once per call is cheap
+		// (config.json read) and picks up user toggles without a session restart.
+		let ideApproval = true
+		try {
+			ideApproval = loadConfig({ cwd: ctx.cwd }).ideApproval
+		} catch {
+			// If config read fails, fall back to the safe default (approval on).
+		}
+		if (!ideApproval) return undefined
+
+		// No IDE connected → fall back to unguarded writes with a one-line warning.
+		// Never deadlock the agent on infrastructure absence.
+		if (!connection) {
+			console.warn("[ide-adapter] IDE not connected; skipping approval for", toolName)
+			return undefined
+		}
+
+		const input = (event.input ?? {}) as Record<string, unknown>
+		const proposed = computeProposedChange(toolName, input, ctx.cwd)
+		if (!proposed) {
+			// Malformed inputs (e.g. edit oldText not found) — defer to the tool's
+			// own validation surface. Don't block; let the tool fail with its own
+			// error message.
+			return undefined
+		}
+
+		const changeId = generateChangeId()
+		const approved = await requestIdeApproval(connection, { ...proposed, changeId }, ctx.signal)
+		if (approved === null) {
+			// IDE call failed — best-effort approval, fall through.
+			console.warn(`[ide-adapter] proposeChange call failed for ${proposed.filePath}; letting ${toolName} proceed`)
+			return undefined
+		}
+		if (!approved) {
+			return {
+				block: true,
+				reason: `User rejected the proposed change to ${proposed.filePath} in the IDE diff viewer.`,
+			}
+		}
+		return undefined
+	})
 
 	pi.on("session_start", (_event, ctx: ExtensionContext) => {
 		currentCtx = ctx
