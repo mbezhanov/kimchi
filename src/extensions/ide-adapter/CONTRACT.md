@@ -96,7 +96,7 @@ Sent when the cursor/selection moves. The IDE should debounce this (e.g. ~150 ms
 
 **Harness behaviour on receipt:**
 
-- **Live indicator** — when a UI is active, the harness renders the selection as an input-box chip (`@file:range`, project-relative path) via `setIdeSelectionIndicator`. The chip updates on every notification, tracking the IDE's live selection.
+- **Live indicator** — when a UI is active, the harness renders the selection as an input-box chip (`@file:range`, using the IDE-supplied absolute path verbatim) via `setIdeSelectionIndicator`. The chip updates on every notification, tracking the IDE's live selection.
 - **Auto-attach on send** — the selection is held in a per-session sticky slot (`_latestSelection`) and prepended to the outgoing prompt on every `pi.on('input')` via the existing `transform` path, without the user typing `@`.
 - **Sticky (non-consumed)** — the slot is *not* drained after a send. Every send re-attaches whatever is currently selected, until the next `selection_changed` overwrites it. This differs from `at_mentioned`, which is drained on send.
 - **Deduplication** — if an explicitly queued `at_mentioned` resolves to the same `@file:range` as the current selection, the selection prefix is suppressed for that send to avoid a double prefix.

@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs"
+import { readdirSync, readFileSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import type { LockfileData } from "./types.js"
@@ -65,17 +65,45 @@ export function isProcessAlive(pid: number): boolean {
 	}
 }
 
+/** Resolve a path to its canonical (symlink-free) form.
+ *
+ * IntelliJ's VFS canonicalizes symlinks — `VirtualFile.path` for a file inside
+ * a symlinked project root returns the real path, not the symlink the user
+ * navigated through. The CLI's `cwd` and the lockfile's `workspaceFolders`
+ * (written from `project.basePath`) can be in symlink form. Comparing or
+ * relativizing across these two path-spaces produces broken `../`-laden
+ * results. This normalizes a path to its canonical form so both sides agree.
+ *
+ * Falls back to the original path if `realpathSync` fails (e.g. the path
+ * doesn't exist on this filesystem — possible in test fixtures or stale
+ * lockfiles).
+ */
+export function realpathSafe(p: string): string {
+	try {
+		return realpathSync(p)
+	} catch {
+		return p
+	}
+}
+
 /** Find a lockfile whose workspaceFolders contains the given cwd.
+ *
+ * Both `cwd` and each `workspaceFolder` are canonicalized via `realpathSafe`
+ * before comparison, so a symlinked project root (e.g. `~/projects/GoProj`
+ * → `~/go/src/GoProj`) matches correctly regardless of which form each side
+ * is in. Without this, a `===` check fails and `findMatchingLockfile` falls
+ * back to `alive[0]`, connecting every kimchi session to the same IDE project
+ * instead of matching per-repo.
  *
  * Falls back to any alive lockfile when none matches the cwd.
  */
 export function findMatchingLockfile(lockfiles: LockfileData[], cwd: string): LockfileData | undefined {
 	const alive = lockfiles.filter((l) => isProcessAlive(l.pid))
+	const cwdReal = realpathSafe(cwd).replace(/\\/g, "/")
 	const exactMatch = alive.find((l) =>
 		l.workspaceFolders.some((wf) => {
-			const normalized = wf.replace(/\\/g, "/")
-			const cwdNormalized = cwd.replace(/\\/g, "/")
-			return normalized === cwdNormalized || cwdNormalized.startsWith(`${normalized}/`)
+			const wfReal = realpathSafe(wf).replace(/\\/g, "/")
+			return wfReal === cwdReal || cwdReal.startsWith(`${wfReal}/`)
 		}),
 	)
 	return exactMatch ?? alive[0]

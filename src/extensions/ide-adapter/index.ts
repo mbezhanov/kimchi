@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs"
-import { relative, resolve } from "node:path"
+import { resolve } from "node:path"
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { Type } from "typebox"
 import { loadConfig } from "../../config.js"
@@ -279,9 +279,10 @@ export default function ideAdapterExtension(pi: ExtensionAPI): void {
 
 		if (m.method === "at_mentioned") {
 			if (typeof params.filePath === "string") {
-				const filePath = currentCtx?.cwd
-					? relative(currentCtx.cwd, params.filePath).replace(/\\/g, "/")
-					: params.filePath
+				// The IDE is the authority on file paths (CONTRACT.md): it sends
+				// absolute paths and the agent's tools resolve them regardless of
+				// cwd, so pass the path through verbatim.
+				const filePath = params.filePath
 				const mention: AtMentionNotification = {
 					filePath,
 					lineStart: typeof params.lineStart === "number" ? params.lineStart : 0,
@@ -303,11 +304,9 @@ export default function ideAdapterExtension(pi: ExtensionAPI): void {
 			}
 		} else if (m.method === "selection_changed") {
 			if (typeof params.filePath === "string") {
-				// Relative-ize the path (matches `at_mentioned`) so the chip shows a
-				// short project-relative `@file:range`, not an absolute path.
-				const filePath = currentCtx?.cwd
-					? relative(currentCtx.cwd, params.filePath).replace(/\\/g, "/")
-					: params.filePath
+				// Pass the IDE-supplied absolute path through verbatim (see
+				// `at_mentioned` above).
+				const filePath = params.filePath
 				const selection: SelectionChangedNotification = {
 					filePath,
 					lineStart: typeof params.lineStart === "number" ? params.lineStart : 0,

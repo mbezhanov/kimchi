@@ -208,7 +208,7 @@ describe("ide-adapter extension", () => {
 
 			handler({ method: "at_mentioned", params: { filePath: "/a/b.ts", lineStart: 10, lineEnd: 20 } })
 
-			expect(pasteToEditor).toHaveBeenCalledWith("@../a/b.ts:10-20")
+			expect(pasteToEditor).toHaveBeenCalledWith("@/a/b.ts:10-20")
 			expect(ctx.ui.setStatus).toHaveBeenCalledWith("ide-adapter-mention", undefined)
 			// Should NOT queue when pasted immediately
 			const inputResult = pi._handlers.input[0]({ text: "hello" })
@@ -260,11 +260,11 @@ describe("ide-adapter extension", () => {
 
 			handler({ method: "at_mentioned", params: { filePath: "/a/b.ts", lineStart: 10, lineEnd: 20 } })
 
-			expect(pasteToEditor).toHaveBeenCalledWith("@../a/b.ts:10-20")
+			expect(pasteToEditor).toHaveBeenCalledWith("@/a/b.ts:10-20")
 			expect(ctx.ui.setStatus).not.toHaveBeenCalled()
 			// Falls back to queue — next input should prepend the mention
 			const inputResult = pi._handlers.input[0]({ text: "hello" })
-			expect(inputResult).toEqual({ action: "transform", text: "@../a/b.ts:10-20 hello" })
+			expect(inputResult).toEqual({ action: "transform", text: "@/a/b.ts:10-20 hello" })
 		})
 
 		it("queues mention when UI is not available", async () => {
@@ -311,7 +311,7 @@ describe("ide-adapter extension", () => {
 
 			expect(ctx.ui.pasteToEditor).not.toHaveBeenCalled()
 			const inputResult = pi._handlers.input[0]({ text: "hello" })
-			expect(inputResult).toEqual({ action: "transform", text: "@../a/b.ts:10-20 hello" })
+			expect(inputResult).toEqual({ action: "transform", text: "@/a/b.ts:10-20 hello" })
 		})
 	})
 
