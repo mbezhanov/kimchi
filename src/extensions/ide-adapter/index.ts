@@ -70,41 +70,109 @@ function computeProposedChange(
 }
 
 /**
- * Call the IDE's `proposeChange` tool and return whether the user approved.
+ * The result of an IDE approval request.
  *
- * Returns `true` on approval, `false` on rejection/timeout/dismissal, and
- * `null` when the IDE call itself failed (network error, tool not exposed,
- * malformed response). On `null` the hook falls back to letting the write
- * proceed — approval is best-effort, never a hard block on infrastructure
- * failure.
+ * - `approved: true` + `newContent` → user approved; `newContent` is the
+ *   user's final (possibly hand-edited) version of the proposed content.
+ *   The hook overrides the tool's input so the agent writes this text
+ *   instead of its original proposal.
+ * - `approved: false` → user rejected / dismissed / timed out. `newContent`
+ *   is null.
+ * - `null` → the IDE call itself failed (network error, tool not exposed,
+ *   malformed response). The hook falls back to letting the write proceed —
+ *   approval is best-effort, never a hard block on infrastructure failure.
+ */
+interface IdeApprovalResult {
+	approved: boolean
+	newContent: string | null
+}
+
+/**
+ * Call the IDE's `proposeChange` tool and return whether the user approved,
+ * along with the user's final (possibly hand-edited) proposed content on
+ * approve.
+ *
+ * Returns `null` when the IDE call itself failed (network error, tool not
+ * exposed, malformed response). On `null` the hook falls back to letting
+ * the write proceed — approval is best-effort, never a hard block on
+ * infrastructure failure.
  *
  * The MCP `tools/call` response is a `CallToolResult` envelope:
  * ```
  * { content: [{ type: "text", text: "{\"approved\": true, ...}" }] }
  * ```
- * The actual `{ approved, changeId }` payload is JSON-stringified inside the
- * first text content block. We must unwrap and parse it before checking the
- * `approved` field — checking `"approved" in result` on the envelope always
- * returns false (the envelope has `content`, not `approved`), which would
- * cause every call to fall into the `null` fallback and let writes proceed
- * regardless of the user's decision.
+ * The actual `{ approved, changeId, newContent }` payload is JSON-stringified
+ * inside the first text content block. We must unwrap and parse it before
+ * checking the `approved` field — checking `"approved" in result` on the
+ * envelope always returns false (the envelope has `content`, not
+ * `approved`), which would cause every call to fall into the `null`
+ * fallback and let writes proceed regardless of the user's decision.
  */
 async function requestIdeApproval(
 	connection: IdeConnection,
 	params: { filePath: string; originalContent: string; newContent: string; changeId: string },
 	signal: AbortSignal | undefined,
-): Promise<boolean | null> {
+): Promise<IdeApprovalResult | null> {
 	try {
 		const result = await connection.callTool("proposeChange", params)
 		if (signal?.aborted) return null
 		const payload = unwrapMcpToolResult(result)
 		if (payload && typeof payload === "object" && "approved" in payload) {
-			return Boolean((payload as { approved: unknown }).approved)
+			const approved = Boolean((payload as { approved: unknown }).approved)
+			const newContent = approved ? stringValue((payload as { newContent?: unknown }).newContent) : null
+			return { approved, newContent }
 		}
 		return null
 	} catch {
 		return null
 	}
+}
+
+/** Return `value` if it's a string, otherwise `undefined`. */
+function stringValue(value: unknown): string | null {
+	return typeof value === "string" ? value : null
+}
+
+/**
+ * Override the agent's write/edit tool input with the user's final (hand-edited)
+ * content from the IDE diff viewer.
+ *
+ * Called by the `tool_call` hook when the user approved a change *and* the
+ * `newContent` they ended up with differs from what the agent originally
+ * proposed. Mutates `input` in place so the downstream tool writes the user's
+ * version rather than the agent's.
+ *
+ * - `write` → set `input.content = editedNewContent` (the only field the tool reads).
+ * - `edit` → replace `input.edits` with a single full-file replacement
+ *   operation `{ oldText: originalContent, newText: editedNewContent }`.
+ *   Reconstructing a fragment-level edit set from a whole-file diff is
+ *   fragile; a single full-file replace is robust and the `edit` tool accepts
+ *   it. The original `edits` array is dropped.
+ *
+ * Both branches also normalise `path` / `file_path` so the rewritten input is
+ * self-consistent regardless of which variant the caller used.
+ */
+function applyEditedContent(
+	input: Record<string, unknown>,
+	toolName: string,
+	editedNewContent: string,
+	originalContent: string,
+): void {
+	const filePath =
+		typeof input.path === "string" ? input.path : typeof input.file_path === "string" ? input.file_path : ""
+	if (toolName === "write") {
+		input.content = editedNewContent
+		if (typeof input.path !== "string" && typeof input.file_path === "string") input.path = input.file_path
+		return
+	}
+	// edit → rewrite as a single full-file replacement.
+	input.edits = [{ oldText: originalContent, newText: editedNewContent }]
+	// Drop legacy single-operation fields so the tool doesn't see conflicting shapes.
+	delete input.oldText
+	delete input.newText
+	delete input.old_text
+	delete input.new_text
+	if (typeof input.path !== "string" && typeof input.file_path === "string") input.path = input.file_path
 }
 
 /**
@@ -369,17 +437,29 @@ export default function ideAdapterExtension(pi: ExtensionAPI): void {
 		}
 
 		const changeId = generateChangeId()
-		const approved = await requestIdeApproval(connection, { ...proposed, changeId }, ctx.signal)
-		if (approved === null) {
+		const approval = await requestIdeApproval(connection, { ...proposed, changeId }, ctx.signal)
+		if (approval === null) {
 			// IDE call failed — best-effort approval, fall through.
 			console.warn(`[ide-adapter] proposeChange call failed for ${proposed.filePath}; letting ${toolName} proceed`)
 			return undefined
 		}
-		if (!approved) {
+		if (!approval.approved) {
 			return {
 				block: true,
 				reason: `User rejected the proposed change to ${proposed.filePath} in the IDE diff viewer.`,
 			}
+		}
+
+		// Approved. If the user hand-edited the proposed content in the IDE diff
+		// viewer, override the tool's input so the agent applies the user's final
+		// version instead of its original proposal.
+		if (approval.newContent !== null && approval.newContent !== proposed.newContent) {
+			applyEditedContent(
+				event.input as Record<string, unknown>,
+				toolName,
+				approval.newContent,
+				proposed.originalContent,
+			)
 		}
 		return undefined
 	})
