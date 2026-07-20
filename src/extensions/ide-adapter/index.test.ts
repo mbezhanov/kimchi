@@ -565,7 +565,7 @@ describe("ide-adapter extension", () => {
 		it("blocks when the user rejects the change", async () => {
 			vi.mocked(loadConfig).mockReturnValue({ ideApproval: true } as never)
 			vi.mocked(readFileSync).mockReturnValue("old")
-			const callTool = vi.fn().mockResolvedValue({ approved: false })
+			const callTool = vi.fn().mockResolvedValue(mcpEnvelope({ approved: false }))
 			const { pi, ctx } = await setupWithConnection(callTool)
 
 			const result = await pi._handlers.tool_call[0](

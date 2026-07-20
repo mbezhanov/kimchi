@@ -3,6 +3,7 @@ import { relative, resolve } from "node:path"
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { Type } from "typebox"
 import { loadConfig } from "../../config.js"
+import { setIdeSelectionIndicator } from "../ui.js"
 import { formatAtMention } from "./at-mentions.js"
 import { applyEditInput } from "./edit-apply.js"
 import { findMatchingLockfile, getLockfileDir, parseLockfile, scanLockfiles } from "./lockfile.js"
@@ -136,7 +137,6 @@ function unwrapMcpToolResult(result: unknown): unknown {
 export default function ideAdapterExtension(pi: ExtensionAPI): void {
 	let connection: IdeConnection | null = null
 	let pollTimer: ReturnType<typeof setInterval> | null = null
-	let _registeredToolNames: string[] = []
 	let isShuttingDown = false
 	let reconnectRetries = 0
 
@@ -211,7 +211,6 @@ export default function ideAdapterExtension(pi: ExtensionAPI): void {
 		// Wire disconnect callback so we can null the handle and reconnect later
 		connection.onDisconnect = () => {
 			connection = null
-			_registeredToolNames = []
 		}
 
 		try {
@@ -220,7 +219,6 @@ export default function ideAdapterExtension(pi: ExtensionAPI): void {
 				if (isShuttingDown) break
 				registerIdeTool(pi, tool)
 			}
-			_registeredToolNames = tools.map((t) => t.name)
 		} catch (err) {
 			console.warn("[ide-adapter] Failed to list IDE tools:", err)
 		}
@@ -305,11 +303,24 @@ export default function ideAdapterExtension(pi: ExtensionAPI): void {
 			}
 		} else if (m.method === "selection_changed") {
 			if (typeof params.filePath === "string") {
-				localSetLatestSelection({
-					filePath: params.filePath,
+				// Relative-ize the path (matches `at_mentioned`) so the chip shows a
+				// short project-relative `@file:range`, not an absolute path.
+				const filePath = currentCtx?.cwd
+					? relative(currentCtx.cwd, params.filePath).replace(/\\/g, "/")
+					: params.filePath
+				const selection: SelectionChangedNotification = {
+					filePath,
 					lineStart: typeof params.lineStart === "number" ? params.lineStart : 0,
 					lineEnd: typeof params.lineEnd === "number" ? params.lineEnd : 0,
-				})
+				}
+				localSetLatestSelection(selection)
+				// Surface as a right-aligned indicator inside the input box's top
+				// border — a dedicated segment alongside (not replacing) the pending
+				// image indicator. The selection is also kept sticky in
+				// `_latestSelection` for auto-attach on send (see `pi.on('input')`).
+				if (currentCtx?.hasUI) {
+					setIdeSelectionIndicator(formatAtMention(selection))
+				}
 			}
 		}
 	}
@@ -324,7 +335,6 @@ export default function ideAdapterExtension(pi: ExtensionAPI): void {
 			// Prevent onDisconnect from clearing a stale handle after we intentionally close
 			const conn = connection
 			connection = null
-			_registeredToolNames = []
 			conn.close().catch((err) => console.warn("[ide-adapter] Disconnect error:", err))
 		}
 	}
@@ -395,12 +405,22 @@ export default function ideAdapterExtension(pi: ExtensionAPI): void {
 	})
 
 	pi.on("input", (event) => {
-		if (!localHasPendingAtMentions()) return
+		// Drain pending at-mentions (manual Cmd+Option+K path). Empty if none queued.
+		const mentions = localHasPendingAtMentions() ? localDrainAtMentions() : []
 
-		const mentions = localDrainAtMentions()
-		if (mentions.length === 0) return
+		// Auto-attach the current IDE selection (sticky). The selection is NOT
+		// consumed — it stays "in sync" with the IDE so every send re-attaches
+		// whatever is currently selected, until a new selection_changed overwrites it.
+		const selectionMention = _latestSelection ? formatAtMention(_latestSelection) : null
 
-		const prefix = mentions.join(" ")
+		// Dedup: if the user explicitly at-mentioned the same range they have
+		// selected (e.g. Cmd+Option+K on the active selection), don't double-prefix.
+		const selectionPrefix = selectionMention && !mentions.includes(selectionMention) ? selectionMention : null
+
+		const prefixes = selectionPrefix ? [...mentions, selectionPrefix] : mentions
+		if (prefixes.length === 0) return
+
+		const prefix = prefixes.join(" ")
 		const text = event.text.trimStart()
 		const newText = text ? `${prefix} ${text}` : prefix
 
@@ -410,6 +430,9 @@ export default function ideAdapterExtension(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", () => {
 		currentCtx = null
 		isShuttingDown = true
+		// Clear the input-box selection indicator so it doesn't persist into
+		// the next session (the PromptEditor instance is reused).
+		setIdeSelectionIndicator(null)
 		disconnect()
 	})
 }
