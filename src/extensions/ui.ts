@@ -113,6 +113,7 @@ function getEnabledModelIds(): Set<string> | null {
 let currentEditor: PromptEditor | undefined
 let pasteImageHandler: (() => void) | undefined
 let currentSessionIndicatorText: string | null = null
+let currentIdeSelectionIndicatorText: string | null = null
 
 const branchPoller = createBranchPoller({
 	refreshBranch: (cb) => refreshGitBranch(cb),
@@ -157,6 +158,22 @@ export function setPasteImageHandler(handler: () => void): void {
  */
 export function setPendingImageIndicator(text: string | null): void {
 	currentEditor?.setPendingImageIndicator(text)
+}
+
+/**
+ * Show or clear the current IDE selection (e.g. `@src/foo.ts:10-20`) on the
+ * prompt's first row, as a separate segment from the pending-image indicator.
+ * Used by the ide-adapter extension to surface the live selection. Pass `null`
+ * to clear.
+ *
+ * Stores the text at module level so that if the editor hasn't been
+ * instantiated yet (e.g. an extension notification arrives before the
+ * TUI renders the editor), the indicator is re-applied when the editor
+ * factory runs — mirroring `setSessionIndicator`'s store-and-reapply pattern.
+ */
+export function setIdeSelectionIndicator(text: string | null): void {
+	currentIdeSelectionIndicatorText = text
+	currentEditor?.setIdeSelectionIndicator(text)
 }
 
 /**
@@ -369,6 +386,9 @@ export default function uiExtension(pi: ExtensionAPI) {
 			}
 			if (currentSessionIndicatorText) {
 				editor.setSessionIndicator(currentSessionIndicatorText)
+			}
+			if (currentIdeSelectionIndicatorText !== null) {
+				editor.setIdeSelectionIndicator(currentIdeSelectionIndicatorText)
 			}
 			return editor
 		})

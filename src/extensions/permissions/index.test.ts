@@ -48,6 +48,10 @@ vi.mock("./classifier.js", async () => {
 	}
 })
 
+vi.mock("../../config.js", () => ({
+	loadConfig: vi.fn(() => ({ ideApproval: false })),
+}))
+
 const testEnv: EnvironmentInfo = {
 	os: "Linux",
 	rawPlatform: "linux",

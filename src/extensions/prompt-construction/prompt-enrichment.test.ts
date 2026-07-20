@@ -894,6 +894,7 @@ describe("continuation nudge turn_end handler", () => {
 			},
 			onboarding: {},
 			deviceId: "test",
+			ideApproval: false,
 		})
 
 		const pi = {

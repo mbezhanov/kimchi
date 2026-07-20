@@ -82,6 +82,41 @@ describe("loadConfig", () => {
 		expect(config.deviceId).toBe("")
 	})
 
+	it("defaults ideApproval to true when absent", () => {
+		const config = loadConfig({ configPath })
+		expect(config.ideApproval).toBe(true)
+	})
+
+	it("reads ideApproval=false from config file", () => {
+		writeFileSync(configPath, JSON.stringify({ ideApproval: false }))
+		const config = loadConfig({ configPath })
+		expect(config.ideApproval).toBe(false)
+	})
+
+	it("reads ideApproval=true explicitly from config file", () => {
+		writeFileSync(configPath, JSON.stringify({ ideApproval: true }))
+		const config = loadConfig({ configPath })
+		expect(config.ideApproval).toBe(true)
+	})
+
+	it("ignores non-boolean ideApproval and falls back to default true", () => {
+		writeFileSync(configPath, JSON.stringify({ ideApproval: "yes" }))
+		const config = loadConfig({ configPath })
+		expect(config.ideApproval).toBe(true)
+	})
+
+	it("project config overrides global ideApproval", () => {
+		const globalDir = mkdtempSync(join(tmpdir(), "kimchi-test-"))
+		const projectDir = mkdtempSync(join(tmpdir(), "kimchi-test-"))
+		const globalPath = join(globalDir, "config.json")
+		const projectPath = join(projectDir, ".kimchi", "config.json")
+		writeFileSync(globalPath, JSON.stringify({ ideApproval: false }))
+		mkdirSync(dirname(projectPath), { recursive: true })
+		writeFileSync(projectPath, JSON.stringify({ ideApproval: true }))
+		const config = loadConfig({ configPath: globalPath, cwd: projectDir })
+		expect(config.ideApproval).toBe(true)
+	})
+
 	it("returns empty apiKey when no key is found", () => {
 		const config = loadConfig({ configPath })
 		expect(config.apiKey).toBe("")

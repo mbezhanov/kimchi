@@ -2,6 +2,7 @@ import { resolve } from "node:path"
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent } from "@earendil-works/pi-coding-agent"
 import { isKeyRelease, matchesKey } from "@earendil-works/pi-tui"
 import { RST_FG, resolvedSemanticFg } from "../../ansi.js"
+import { loadConfig as loadCliConfig } from "../../config.js"
 import { FermentEventStore } from "../../ferment/event-store.js"
 import { resolveFermentsDir } from "../../ferment/store.js"
 import { isExistingDirectory } from "../../fs-paths.js"
@@ -792,6 +793,28 @@ export default function permissionsExtension(pi: ExtensionAPI): void {
 			}
 
 			if (BUILTIN_ALLOW_TOOL_NAMES.includes(toolName)) return undefined
+
+			// IDE approval deferral: when the ide-adapter extension is handling
+			// write/edit approvals via the IDE's diff viewer (ideApproval=true,
+			// IDE connected), the permissions hook must NOT show its own terminal
+			// prompt — otherwise the user has to answer both the IDE dialog AND the
+			// terminal prompt for the same write. The ide-adapter's tool_call
+			// hook runs separately and returns { block: true } if the user rejects
+			// in the IDE; if it returns undefined (approved), we fall through here
+			// and this deferral lets the tool proceed without a second prompt.
+			if (toolName === "write" || toolName === "edit") {
+				try {
+					const cliConfig = loadCliConfig({ cwd: ctx.cwd })
+					if (cliConfig.ideApproval) {
+						// ide-adapter owns the approval decision for file writes.
+						// Defer to it; do not prompt in the terminal.
+						return undefined
+					}
+				} catch {
+					// Config read failed — fall through to the normal permission flow
+					// so writes are never silently allowed on infrastructure failure.
+				}
+			}
 
 			// Ferment tools are internal state-management operations; bypass user rules and classifier prompts.
 			// User-facing ferment tools (`ask_user`) are listed in USER_FACING_FERMENT_TOOL_NAMES and skip this bypass.
