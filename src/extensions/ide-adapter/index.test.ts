@@ -70,6 +70,7 @@ describe("ide-adapter extension", () => {
 			removeContextFiles: vi.fn(),
 			defineCommand: vi.fn(),
 			requireApproval: vi.fn(),
+			sendMessage: vi.fn(),
 			setSystemPrompt: vi.fn(),
 			setCustomSystemPrompt: vi.fn(),
 			setModelRole: vi.fn(),
@@ -693,6 +694,56 @@ describe("ide-adapter extension", () => {
 					newContent: "fresh",
 				}),
 			)
+		})
+
+		it("overrides write.input.content when the user hand-edits the proposed content", async () => {
+			vi.mocked(loadConfig).mockReturnValue({ ideApproval: true } as never)
+			vi.mocked(readFileSync).mockReturnValue("old")
+			// IDE returns approved=true with newContent = the user's edited version,
+			// which differs from the agent's original proposal ("new").
+			const callTool = vi.fn().mockResolvedValue(mcpEnvelope({ approved: true, newContent: "user-edited content" }))
+			const { pi, ctx } = await setupWithConnection(callTool)
+
+			const eventInput: Record<string, unknown> = { path: "a.txt", content: "new" }
+			const result = await pi._handlers.tool_call[0]({ toolName: "write", input: eventInput }, ctx)
+			expect(result).toBeUndefined()
+			// The hook must have mutated the input so the write tool applies the user's text.
+			expect(eventInput.content).toBe("user-edited content")
+		})
+
+		it("does not override write.input when the user did not edit the proposed content", async () => {
+			vi.mocked(loadConfig).mockReturnValue({ ideApproval: true } as never)
+			vi.mocked(readFileSync).mockReturnValue("old")
+			// IDE returns approved=true with newContent = the agent's original proposal.
+			const callTool = vi.fn().mockResolvedValue(mcpEnvelope({ approved: true, newContent: "new" }))
+			const { pi, ctx } = await setupWithConnection(callTool)
+
+			const eventInput: Record<string, unknown> = { path: "a.txt", content: "new" }
+			await pi._handlers.tool_call[0]({ toolName: "write", input: eventInput }, ctx)
+			// No override — the agent's original content is preserved.
+			expect(eventInput.content).toBe("new")
+		})
+
+		it("overrides edit.input.edits with a full-file replacement when the user hand-edits the proposed content", async () => {
+			vi.mocked(loadConfig).mockReturnValue({ ideApproval: true } as never)
+			vi.mocked(readFileSync).mockReturnValue("hello world")
+			// Agent proposes replacing "world" -> "kimchi" (final newContent = "hello kimchi").
+			// User then hand-edits the proposed pane to "hello KIMCHI". The hook must
+			// rewrite input.edits as a single full-file replace.
+			const callTool = vi.fn().mockResolvedValue(mcpEnvelope({ approved: true, newContent: "hello KIMCHI" }))
+			const { pi, ctx } = await setupWithConnection(callTool)
+
+			const eventInput: Record<string, unknown> = {
+				path: "a.txt",
+				edits: [{ oldText: "world", newText: "kimchi" }],
+			}
+			const result = await pi._handlers.tool_call[0]({ toolName: "edit", input: eventInput }, ctx)
+			expect(result).toBeUndefined()
+			// input.edits is rewritten to a single full-file replacement operation.
+			expect(eventInput.edits).toEqual([{ oldText: "hello world", newText: "hello KIMCHI" }])
+			// Legacy single-operation fields are cleared.
+			expect(eventInput.oldText).toBeUndefined()
+			expect(eventInput.newText).toBeUndefined()
 		})
 	})
 })

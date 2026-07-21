@@ -460,6 +460,23 @@ export default function ideAdapterExtension(pi: ExtensionAPI): void {
 				approval.newContent,
 				proposed.originalContent,
 			)
+			// Steer the LLM so its summary reflects what was actually written, not
+			// its original proposal. Without this, the agent confidently reports
+			// its proposed value (e.g. "PostgreSQL") even though the user changed
+			// it in the diff viewer (e.g. to "Oracle") and that's what was written.
+			pi.sendMessage(
+				{
+					customType: "ide-adapter-edit-steer",
+					content: [
+						{
+							type: "text",
+							text: `The user hand-edited your proposed change to ${proposed.filePath} in the IDE diff viewer before it was applied. The actual content written to disk differs from your original proposal — do not assume your proposed content was applied verbatim. If you need to reference the exact value, read the file from disk.`,
+						},
+					],
+					display: false,
+				},
+				{ deliverAs: "steer" },
+			)
 		}
 		return undefined
 	})
